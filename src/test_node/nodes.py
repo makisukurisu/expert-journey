@@ -1,4 +1,5 @@
 import ast
+import enum
 from inspect import cleandoc
 import io
 import os
@@ -6,6 +7,7 @@ from pathlib import Path
 from typing import Generator, Literal
 
 import PIL.ImageFilter
+from sympy import Li
 from server import PromptServer
 
 import PIL.Image
@@ -343,15 +345,23 @@ class EmbedderNode(BaseNode):
     FUNCTION = "embedd"
 
     OUTPUT_NODE = True
+    INPUT_IS_LIST = True
 
     def embedd(
         self,
-        image: torch.Tensor,
-        channel: Literal["Y", "Cb", "Cr"],
-        message_file: str,
-        code_words: torch.Tensor,
-        multiplier: int,
+        image: list[torch.Tensor],
+        channel: list[Literal["Y", "Cb", "Cr"]],
+        message_file: list[str],
+        code_words: list[torch.Tensor],
+        multiplier: list[int],
     ) -> tuple[torch.Tensor]:
+        # All inputs are now lists :)
+        image: torch.Tensor = image[0]
+        channel: Literal["Y", "Cb", "Cr"] = channel[0]
+        message_file: str = message_file[0]
+        code_words: torch.Tensor = code_words[0]
+        multiplier: int = multiplier[0]
+
         imported_list = ImageConverter.tensor_to_PIL(
             tensor=image,
             mode="YCbCr",
@@ -368,7 +378,7 @@ class EmbedderNode(BaseNode):
         # Prepare code words list
         cw_list: list[np.ndarray] = []
 
-        for cw_index, cw in enumerate(code_words):
+        for _, cw in enumerate(code_words):
             word = cw.cpu().numpy() * 255.0
             # Converts to uint8 then to int8 to get negative values
             cw_list.append(word.astype(np.uint8).astype(np.int8))
@@ -977,6 +987,34 @@ class CompareBinaryDataNode(BaseNode):
         return (total_bits, different_bits, accuracy_percent)
 
 
+class MaskBatchNode(BaseNode):
+    @classmethod
+    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple | str]]:
+        return {
+            "required": {
+                "mask1": ("MASK",),
+                "mask2": ("MASK",),
+                "mask3": ("MASK",),
+                "mask4": ("MASK",),
+            }
+        }
+
+    RETURN_TYPES = ("MASK",)
+    FUNCTION = "batch"
+
+    CATEGORY = "Utils"
+
+    def batch(
+        self,
+        mask1: torch.Tensor,
+        mask2: torch.Tensor,
+        mask3: torch.Tensor,
+        mask4: torch.Tensor,
+    ) -> tuple[torch.Tensor]:
+        s = torch.cat((mask1, mask2, mask3, mask4), dim=0)
+        return (s,)
+
+
 # A dictionary that contains all nodes you want to export with their names
 # NOTE: names should be globally unique
 NODE_CLASS_MAPPINGS = {
@@ -990,6 +1028,7 @@ NODE_CLASS_MAPPINGS = {
     "NoiseAttackNode": NoiseAttackNode,
     "JPEGCompressionNode": JPEGCompressionNode,
     "BlurNode": BlurNode,
+    "MaskBatchNode": MaskBatchNode,
 }
 
 # A dictionary that contains the friendly/humanly readable titles for the nodes
@@ -1004,4 +1043,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "NoiseAttackNode": "Add Noise Attack to Image",
     "JPEGCompressionNode": "Apply JPEG Compression to Image",
     "BlurNode": "Apply Blur Effect to Image",
+    "MaskBatchNode": "Batch Masks Together",
 }
