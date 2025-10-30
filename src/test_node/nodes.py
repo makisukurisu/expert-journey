@@ -1,8 +1,12 @@
 import ast
 from inspect import cleandoc
+import io
 import os
 from pathlib import Path
 from typing import Generator, Literal
+
+import PIL.ImageFilter
+from server import PromptServer
 
 import PIL.Image
 import numpy
@@ -26,8 +30,10 @@ class BaseNode:
     Base node class
     """
 
+    CATEGORY = "Steganography"
+
     @classmethod
-    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple]]:
+    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple | str]]:
         raise NotImplementedError("Implement inputs for your node")
 
     @classmethod
@@ -42,8 +48,6 @@ class BaseNode:
 
     # That will be called
     FUNCTION: str
-
-    CATEGORY: str = "No Category"
 
     OUTPUT_NODE: bool = False
 
@@ -243,7 +247,7 @@ class MultiEmbedder(BaseEmbedder):
 
 class ToYCbCr(BaseNode):
     @classmethod
-    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple]]:
+    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple | str]]:
         return {
             "required": {
                 "images": (
@@ -278,8 +282,10 @@ class ToYCbCr(BaseNode):
 
 # New node: convert YCbCr -> RGB (inverse of ToYCbCr)
 class ToRGB(BaseNode):
+    CATEGORY = "Utils"
+
     @classmethod
-    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple]]:
+    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple | str]]:
         return {
             "required": {
                 "images": (
@@ -306,7 +312,7 @@ class EmbedderNode(BaseNode):
         return Path(folder_paths.get_input_directory()) / "data"
 
     @classmethod
-    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple]]:
+    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple | str]]:
         data_dir = cls.data_dir()
 
         if os.path.exists(data_dir) is False:
@@ -398,9 +404,17 @@ class EmbedderNode(BaseNode):
 
 
 class PrintInput(BaseNode):
+    CATEGORY = "Utils"
+
     @classmethod
-    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple]]:
-        return {"optional": {"int_input": ("INT",)}}
+    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple | str]]:
+        return {
+            "optional": {
+                "int_input": ("INT",),
+                "float_input": ("FLOAT",),
+            },
+            "hidden": {"node_id": "UNIQUE_ID"},
+        }
 
     RETURN_TYPES = tuple()
 
@@ -408,8 +422,11 @@ class PrintInput(BaseNode):
 
     OUTPUT_NODE = True
 
-    def print_data(self, int_input: int) -> tuple:
-        print(f"{int_input=}")
+    def print_data(self, int_input: int, float_input: float, node_id: str) -> tuple:
+        PromptServer.instance.send_progress_text(
+            f"PrintInput node received int_input={int_input}, float_input={float_input}",
+            node_id=node_id,
+        )
         return tuple()
 
 
@@ -526,7 +543,7 @@ class ExtractorNode(BaseNode):
         return Path(folder_paths.get_input_directory()) / "data"
 
     @classmethod
-    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple]]:
+    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple | str]]:
         data_dir = cls.data_dir()
         if os.path.exists(data_dir) is False:
             os.makedirs(data_dir)
@@ -557,10 +574,10 @@ class ExtractorNode(BaseNode):
             }
         }
 
-    RETURN_TYPES = tuple()
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("out_filename",)
     FUNCTION = "extract"
     OUTPUT_NODE = True
-    CATEGORY = "Stego"
 
     def extract(
         self,
@@ -622,8 +639,342 @@ class ExtractorNode(BaseNode):
         with open(out_path, "wb") as f:
             f.write(bytes_out)
 
-        print(f"Extracted {len(bytes_out)} bytes -> {out_path}")
-        return tuple()
+        return (out_path,)
+
+
+# Compression node (JPEG) - takes in an image, applies JPEG compression
+# Returns the compressed image
+# Parameters: quality (INT) from 100 to 1
+
+
+class JPEGCompressionNode(BaseNode):
+    @classmethod
+    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple | str]]:
+        return {
+            "required": {
+                "image": (
+                    "IMAGE",
+                    {"tooltip": "The image to compress"},
+                ),
+                "quality": (
+                    "INT",
+                    {
+                        "default": 90,
+                        "min": 1,
+                        "max": 100,
+                        "tooltip": "The quality of the JPEG compression (1-100)",
+                    },
+                ),
+            },
+            "hidden": {"node_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("compressed_image",)
+    FUNCTION = "compress"
+
+    def compress(
+        self,
+        image: torch.Tensor,
+        quality: int,
+        node_id: str,
+    ) -> tuple[torch.Tensor]:
+        imported_list = ImageConverter.tensor_to_PIL(
+            tensor=image,
+        )
+        compressed_list = []
+
+        for img in imported_list:
+            img_bytes = io.BytesIO()
+            img.save(img_bytes, format="JPEG", quality=quality)
+            img_bytes.seek(0)
+            compressed_img = PIL.Image.open(img_bytes)
+            compressed_list.append(compressed_img)
+
+        PromptServer.instance.send_progress_text(
+            f"Applied JPEG compression with quality {quality}.",
+            node_id=node_id,
+        )
+
+        return (ImageConverter.PIL_to_tensor(images=compressed_list),)
+
+
+# Blur node - takes in an image, applies Gaussian blur
+# Returns the blurred image
+# Parameters: radius (FLOAT)
+
+
+class BlurNode(BaseNode):
+    @classmethod
+    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple | str]]:
+        return {
+            "required": {
+                "image": (
+                    "IMAGE",
+                    {"tooltip": "The image to blur"},
+                ),
+                "radius": (
+                    "FLOAT",
+                    {
+                        "default": 2.0,
+                        "min": 0.0,
+                        "max": 20.0,
+                        "tooltip": "The radius of the Gaussian blur (in pixels)",
+                    },
+                ),
+            },
+            "hidden": {"node_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("blurred_image",)
+    FUNCTION = "apply_blur"
+
+    def apply_blur(
+        self,
+        image: torch.Tensor,
+        radius: float,
+        node_id: str,
+    ) -> tuple[torch.Tensor]:
+        imported_list = ImageConverter.tensor_to_PIL(
+            tensor=image,
+        )
+        blurred_list = []
+
+        for img in imported_list:
+            blurred_img = img.filter(PIL.ImageFilter.GaussianBlur(radius=radius))
+            blurred_list.append(blurred_img)
+
+        PromptServer.instance.send_progress_text(
+            f"Applied Gaussian blur with radius {radius}.",
+            node_id=node_id,
+        )
+
+        return (ImageConverter.PIL_to_tensor(images=blurred_list),)
+
+
+# Noise Attack Node - takes in an image, adds random noise to it
+# (with seed field for reproducibility)
+# Returns the noised image
+
+
+class NoiseAttackNode(BaseNode):
+    @classmethod
+    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple | str]]:
+        return {
+            "required": {
+                "image": (
+                    "IMAGE",
+                    {"tooltip": "The image to add noise to"},
+                ),
+                "mode": (
+                    [
+                        "salt",
+                        "pepper",
+                    ],
+                    {"default": "salt"},
+                ),
+                "amount": (
+                    "FLOAT",
+                    {
+                        "default": 0.0005,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "tooltip": "The amount of noise to add (as a fraction of pixels)",
+                    },
+                ),
+                "seed": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 0xFFFFFFFFFFFFFFFF,
+                        "control_after_generate": True,
+                        "tooltip": "The random seed used for creating the noise.",
+                    },
+                ),
+            },
+            "hidden": {"node_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("noised_image",)
+    FUNCTION = "add_noise"
+
+    def add_noise(
+        self,
+        image: torch.Tensor,
+        mode: Literal["salt", "pepper"],
+        amount: float,
+        seed: int,
+        node_id: str,
+    ) -> tuple[torch.Tensor]:
+        imported_list = ImageConverter.tensor_to_PIL(
+            tensor=image,
+        )
+        noised_list = []
+
+        rng = np.random.default_rng(seed)
+
+        for img in imported_list:
+            np_img = np.array(img)
+
+            total_pixels = np_img.shape[0] * np_img.shape[1]
+            num_noisy = int(total_pixels * amount)
+
+            coords = [
+                (
+                    rng.integers(0, np_img.shape[0]),
+                    rng.integers(0, np_img.shape[1]),
+                )
+                for _ in range(num_noisy)
+            ]
+
+            for y, x in coords:
+                if mode == "salt":
+                    np_img[y, x] = 255
+                elif mode == "pepper":
+                    np_img[y, x] = 0
+
+            noised_list.append(PIL.Image.fromarray(np_img))
+
+        PromptServer.instance.send_progress_text(
+            f"Added {amount * 100:.2f}% {mode} noise to image.",
+            node_id=node_id,
+        )
+
+        return (ImageConverter.PIL_to_tensor(images=noised_list),)
+
+
+# PSNR node
+# Takes in an Original Image and a Test Image
+# Calculates the PSNR between the two images
+# Returns the PSNR value (FLOAT)
+# Prints "progress" to the PromptServer with the PSNR value
+
+
+class PSNRNode(BaseNode):
+    OUTPUT_NODE = True
+
+    @classmethod
+    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple | str]]:
+        return {
+            "required": {
+                "original_image": (
+                    "IMAGE",
+                    {"tooltip": "The original image for comparison"},
+                ),
+                "test_image": (
+                    "IMAGE",
+                    {"tooltip": "The test image to compare against the original"},
+                ),
+            },
+            "hidden": {"node_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ("FLOAT",)
+    RETURN_NAMES = ("psnr_value",)
+    FUNCTION = "calculate_psnr"
+
+    def calculate_psnr(
+        self,
+        original_image: torch.Tensor,
+        test_image: torch.Tensor,
+        node_id: str,
+    ) -> tuple[float]:
+        mse = torch.mean((original_image - test_image) ** 2).item()
+        if mse == 0:
+            psnr = float("inf")
+        else:
+            max_pixel = 1.0  # assuming images are normalized between 0 and 1
+            psnr = 20 * torch.log10(torch.tensor(max_pixel)) - 10 * torch.log10(
+                torch.tensor(mse)
+            )
+            psnr = psnr.item()
+
+        PromptServer.instance.send_progress_text(
+            f"PSNR Value: {psnr:.4f} dB",
+            node_id=node_id,
+        )
+
+        return (psnr,)
+
+
+class CompareBinaryDataNode(BaseNode):
+    CATEGORY = "Utils"
+
+    @classmethod
+    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple | str]]:
+        return {
+            "required": {
+                "original": (
+                    "STRING",
+                    {
+                        "default": "data/data.bin",
+                        "tooltip": "Path is relative to the input folder",
+                    },
+                ),
+                "test_data": (
+                    "STRING",
+                    {
+                        "default": "data/extracted.bin",
+                        "tooltip": "Path is relative to the input folder",
+                    },
+                ),
+            },
+            "hidden": {"node_id": "UNIQUE_ID"},
+        }
+
+    RETURN_TYPES = ("INT", "INT", "FLOAT")
+    RETURN_NAMES = ("total_bits", "different_bits", "accuracy_percent")
+    FUNCTION = "compare"
+
+    def compare(
+        self,
+        original: str,
+        test_data: str,
+        node_id: str,
+    ) -> tuple[int, int, float]:
+        original = (Path(folder_paths.get_input_directory()) / original).as_posix()
+        test_data = Path(test_data).as_posix()
+        if not os.path.exists(test_data):
+            test_data = (
+                Path(folder_paths.get_input_directory()) / test_data
+            ).as_posix()
+
+        with open(original, "rb") as f:
+            original_bytes = f.read()
+        with open(test_data, "rb") as f:
+            test_bytes = f.read()[: len(original_bytes)]  # truncate to original length
+
+        total_bits = len(original_bytes) * 8
+        different_bits = 0
+
+        for b1, b2 in zip(original_bytes, test_bytes):
+            diff = b1 ^ b2
+            different_bits += bin(diff).count("1")
+
+        accuracy_percent = (
+            (total_bits - different_bits) / total_bits * 100.0
+            if total_bits > 0
+            else 0.0
+        )
+
+        PromptServer.instance.send_sync(
+            "stego.compareBinaryData.result",
+            {
+                "total_bits": total_bits,
+                "different_bits": different_bits,
+                "accuracy_percent": accuracy_percent,
+            },
+        )
+
+        PromptServer.instance.send_progress_text(
+            f"Total Bits: {total_bits}\nDifferent Bits: {different_bits}\nAccuracy: {accuracy_percent:.4f}%",
+            node_id=node_id,
+        )
+
+        return (total_bits, different_bits, accuracy_percent)
 
 
 # A dictionary that contains all nodes you want to export with their names
@@ -634,6 +985,11 @@ NODE_CLASS_MAPPINGS = {
     "ToYCbCr": ToYCbCr,
     "ToRGB": ToRGB,
     "ExtractorNode": ExtractorNode,
+    "CompareBinaryDataNode": CompareBinaryDataNode,
+    "PSNRNode": PSNRNode,
+    "NoiseAttackNode": NoiseAttackNode,
+    "JPEGCompressionNode": JPEGCompressionNode,
+    "BlurNode": BlurNode,
 }
 
 # A dictionary that contains the friendly/humanly readable titles for the nodes
@@ -643,4 +999,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ToYCbCr": "Convert RGB input to YcBcCr color scheme",
     "ToRGB": "Convert YcBcCr input to RGB color scheme",
     "ExtractorNode": "Extract stego-info from an image",
+    "CompareBinaryDataNode": "Compare Binary Data Files",
+    "PSNRNode": "Calculate PSNR between two images",
+    "NoiseAttackNode": "Add Noise Attack to Image",
+    "JPEGCompressionNode": "Apply JPEG Compression to Image",
+    "BlurNode": "Apply Blur Effect to Image",
 }
