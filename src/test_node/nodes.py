@@ -1,6 +1,7 @@
 import ast
 from inspect import cleandoc
 import io
+import json
 import os
 from pathlib import Path
 from typing import Generator, Literal
@@ -37,7 +38,7 @@ class BaseNode:
         raise NotImplementedError("Implement inputs for your node")
 
     @classmethod
-    def IS_CHANGED(cls, *args):
+    def IS_CHANGED(cls, *args, **kwargs):
         pass
 
     RETURN_TYPES: tuple
@@ -420,6 +421,7 @@ class PrintInput(BaseNode):
             "optional": {
                 "int_input": ("INT",),
                 "float_input": ("FLOAT",),
+                "string_input": ("STRING",),
             },
             "hidden": {"node_id": "UNIQUE_ID"},
         }
@@ -430,11 +432,30 @@ class PrintInput(BaseNode):
 
     OUTPUT_NODE = True
 
-    def print_data(self, int_input: int, float_input: float, node_id: str) -> tuple:
+    def print_data(
+        self,
+        int_input: int,
+        float_input: float,
+        string_input: str,
+        node_id: str,
+    ) -> tuple:
         PromptServer.instance.send_progress_text(
-            f"PrintInput node received int_input={int_input}, float_input={float_input}",
+            f"int_input={int_input}\nfloat_input={float_input}\nstring_input='{string_input}'",
             node_id=node_id,
         )
+
+        open("print_input_debug.txt", "a").write(
+            json.dumps(
+                {
+                    "node_id": node_id,
+                    "int_input": int_input,
+                    "float_input": float_input,
+                    "string_input": string_input,
+                }
+            )
+            + "\n"
+        )
+
         return tuple()
 
 
@@ -1013,6 +1034,87 @@ class MaskBatchNode(BaseNode):
         return (s,)
 
 
+# From: https://github.com/justUmen/Bjornulf_custom_nodes/blob/main/loop_integer.py
+class LoopInteger:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "start": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 1000,
+                        "control_after_generate": True,
+                    },
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("INT",)
+    FUNCTION = "noop"
+
+    def noop(self, start: int) -> tuple[int]:
+        return (start,)
+
+
+def load_and_process_images(image_files, input_dir):
+    """Utility function to load and process a list of images.
+
+    Args:
+        image_files: List of image filenames
+        input_dir: Base directory containing the images
+        resize_method: How to handle images of different sizes ("None", "Stretch", "Crop", "Pad")
+
+    Returns:
+        torch.Tensor: Batch of processed images
+    """
+    if not image_files:
+        raise ValueError("No valid images found in input")
+
+    output_images = []
+
+    for file in image_files:
+        image_path = os.path.join(input_dir, file)
+        img = PIL.Image.open(image_path)
+
+        img_array = np.array(img).astype(np.float32) / 255.0
+        img_tensor = torch.from_numpy(img_array)[None,]
+        output_images.append(img_tensor)
+
+    return torch.cat(output_images, dim=0)
+
+
+class LoadImageSetFromFolderNodeWithoutResize(BaseNode):
+    @classmethod
+    def INPUT_TYPES(cls) -> dict[str, dict[str, tuple | str]]:
+        return {
+            "required": {
+                "folder": (
+                    folder_paths.get_input_subfolders(),
+                    {"tooltip": "The folder to load images from."},
+                )
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "load_images"
+    CATEGORY = "loaders"
+    DESCRIPTION = "Loads a batch of images from a directory for training."
+
+    def load_images(self, folder):
+        sub_input_dir = os.path.join(folder_paths.get_input_directory(), folder)
+        valid_extensions = [".png", ".jpg", ".jpeg", ".webp"]
+        image_files = [
+            f
+            for f in os.listdir(sub_input_dir)
+            if any(f.lower().endswith(ext) for ext in valid_extensions)
+        ]
+        output_tensor = load_and_process_images(image_files, sub_input_dir)
+        return (output_tensor,)
+
+
 # A dictionary that contains all nodes you want to export with their names
 # NOTE: names should be globally unique
 NODE_CLASS_MAPPINGS = {
@@ -1027,6 +1129,8 @@ NODE_CLASS_MAPPINGS = {
     "JPEGCompressionNode": JPEGCompressionNode,
     "BlurNode": BlurNode,
     "MaskBatchNode": MaskBatchNode,
+    "LoopInteger": LoopInteger,
+    "LoadImageSetFromFolderNodeWithoutResize": LoadImageSetFromFolderNodeWithoutResize,
 }
 
 # A dictionary that contains the friendly/humanly readable titles for the nodes
@@ -1042,4 +1146,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "JPEGCompressionNode": "Apply JPEG Compression to Image",
     "BlurNode": "Apply Blur Effect to Image",
     "MaskBatchNode": "Batch Masks Together",
+    "LoopInteger": "Loop Integer Range",
+    "LoadImageSetFromFolderNodeWithoutResize": "Load Image Set From Folder Without Resize",
 }
